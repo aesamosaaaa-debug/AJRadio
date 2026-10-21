@@ -29,10 +29,10 @@ jobs:
               compileSdk = 34
               defaultConfig {
                   applicationId = "com.example.ajradio"
-                  minSdk = 24
+                  minSdk = 26
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "2.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -58,8 +58,8 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <application
-                  android:label="راديو الجزيرة"
-                  android:icon="@android:drawable/ic_media_play"
+                  android:label="راديو الانترنت"
+                  android:icon="@mipmap/ic_launcher"
                   android:supportsRtl="true"
                   android:usesCleartextTraffic="true"
                   android:theme="@android:style/Theme.Material.NoActionBar">
@@ -77,22 +77,149 @@ jobs:
                           <action android:name="androidx.media3.session.MediaSessionService" />
                       </intent-filter>
                   </service>
+                  <receiver android:name=".ActionReceiver" android:exported="false" />
+                  <receiver android:name=".RadioWidget" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                      </intent-filter>
+                      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info" />
+                  </receiver>
               </application>
           </manifest>
           EOF_FILE_1
+          mkdir -p $(dirname app/src/main/java/com/example/ajradio/Cfg.kt)
+          cat > app/src/main/java/com/example/ajradio/Cfg.kt <<'EOF_FILE_2'
+          package com.example.ajradio
+
+          import android.app.AlarmManager
+          import android.app.PendingIntent
+          import android.content.Context
+          import android.content.Intent
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MediaMetadata
+          import org.json.JSONArray
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.net.URLEncoder
+          import java.util.Calendar
+
+          object Cfg {
+              const val DEF_URL = "https://live-hls-audio-web-aja.getaj.net/VOICE-AJA/01.m3u8"
+              const val DEF_NAME = "الجزيرة"
+              val sec = intArrayOf(10, 30, 90)
+              val off = longArrayOf(6000, 20000, 45000)
+
+              fun live(idx: Int) = MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(off[idx]).build()
+
+              fun item(url: String, name: String, idx: Int): MediaItem = MediaItem.Builder()
+                  .setUri(url)
+                  .setMediaMetadata(MediaMetadata.Builder().setTitle(name).setArtist("راديو الانترنت").build())
+                  .setLiveConfiguration(live(idx))
+                  .build()
+
+              fun saved(c: Context): MediaItem {
+                  val p = c.getSharedPreferences("aj", 0)
+                  return item(p.getString("sel", DEF_URL)!!, p.getString("selName", DEF_NAME)!!, p.getInt("buf", 1))
+              }
+
+              fun op(c: Context, action: String, code: Int): PendingIntent = PendingIntent.getBroadcast(
+                  c, code, Intent(c, ActionReceiver::class.java).setAction(action),
+                  PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+              )
+
+              fun setAlarm(c: Context) {
+                  val p = c.getSharedPreferences("aj", 0)
+                  val cal = Calendar.getInstance().apply {
+                      set(Calendar.HOUR_OF_DAY, p.getInt("alH", 7)); set(Calendar.MINUTE, p.getInt("alM", 0))
+                      set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+                      if (timeInMillis <= System.currentTimeMillis() + 1000) add(Calendar.DAY_OF_YEAR, 1)
+                  }
+                  val show = PendingIntent.getActivity(c, 1, Intent(c, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+                  c.getSystemService(AlarmManager::class.java)
+                      .setAlarmClock(AlarmManager.AlarmClockInfo(cal.timeInMillis, show), op(c, "aj.ALARM", 2))
+              }
+
+              fun cancelAlarm(c: Context) {
+                  c.getSystemService(AlarmManager::class.java).cancel(op(c, "aj.ALARM", 2))
+              }
+
+              fun search(q: String): List<Pair<String, String>> {
+                  for (h in listOf("de1", "nl1", "fi1")) {
+                      try {
+                          val u = URL("https://${h}.api.radio-browser.info/json/stations/search?limit=30&hidebroken=true&order=clickcount&reverse=true&name=" + URLEncoder.encode(q, "UTF-8"))
+                          val con = u.openConnection() as HttpURLConnection
+                          con.setRequestProperty("User-Agent", "InternetRadio/2.0")
+                          con.connectTimeout = 8000; con.readTimeout = 8000
+                          val a = JSONArray(con.inputStream.bufferedReader().readText())
+                          return (0 until a.length()).map {
+                              val o = a.getJSONObject(it)
+                              val cc = o.optString("countrycode")
+                              Pair(o.optString("name").trim() + (if (cc.isEmpty()) "" else " ($cc)"), o.optString("url_resolved"))
+                          }.filter { it.second.startsWith("http") }
+                      } catch (e: Exception) { }
+                  }
+                  return emptyList()
+              }
+          }
+          EOF_FILE_2
+          mkdir -p $(dirname app/src/main/java/com/example/ajradio/Extras.kt)
+          cat > app/src/main/java/com/example/ajradio/Extras.kt <<'EOF_FILE_3'
+          package com.example.ajradio
+
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.BroadcastReceiver
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.widget.RemoteViews
+          import androidx.core.content.ContextCompat
+          import androidx.media3.session.MediaController
+          import androidx.media3.session.SessionToken
+
+          class ActionReceiver : BroadcastReceiver() {
+              override fun onReceive(c: Context, i: Intent) {
+                  val pr = goAsync()
+                  val action = i.action
+                  if (action == "aj.ALARM" && c.getSharedPreferences("aj", 0).getBoolean("alOn", false)) Cfg.setAlarm(c)
+                  val f = MediaController.Builder(c, SessionToken(c, ComponentName(c, PlaybackService::class.java))).buildAsync()
+                  f.addListener({
+                      try {
+                          val m = f.get()
+                          if (action == "aj.TOGGLE" && m.playWhenReady) m.pause()
+                          else { m.setMediaItem(Cfg.saved(c)); m.prepare(); m.play() }
+                      } catch (e: Exception) { }
+                      pr.finish()
+                  }, ContextCompat.getMainExecutor(c))
+              }
+          }
+
+          class RadioWidget : AppWidgetProvider() {
+              override fun onUpdate(c: Context, m: AppWidgetManager, ids: IntArray) {
+                  val v = RemoteViews(c.packageName, R.layout.widget)
+                  v.setOnClickPendingIntent(R.id.wroot, Cfg.op(c, "aj.TOGGLE", 3))
+                  ids.forEach { m.updateAppWidget(it, v) }
+              }
+          }
+          EOF_FILE_3
           mkdir -p $(dirname app/src/main/java/com/example/ajradio/MainActivity.kt)
-          cat > app/src/main/java/com/example/ajradio/MainActivity.kt <<'EOF_FILE_2'
+          cat > app/src/main/java/com/example/ajradio/MainActivity.kt <<'EOF_FILE_4'
           package com.example.ajradio
 
           import android.Manifest
           import android.app.Activity
           import android.app.AlertDialog
+          import android.app.TimePickerDialog
           import android.content.ComponentName
           import android.content.SharedPreferences
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
           import android.os.Build
           import android.os.Bundle
           import android.text.InputType
+          import android.view.Gravity
           import android.view.View
+          import android.view.inputmethod.EditorInfo
           import android.widget.*
           import androidx.core.content.ContextCompat
           import androidx.media3.common.PlaybackException
@@ -105,6 +232,13 @@ jobs:
           import java.util.Date
           import java.util.Locale
 
+          private val BG = 0xFF0B1F23.toInt()
+          private val CARD = 0xFF12333A.toInt()
+          private val CHIP = 0xFF1B454D.toInt()
+          private val GOLD = 0xFFE3B866.toInt()
+          private val TXT = 0xFFF1EADB.toInt()
+          private val MUTE = 0xFF8FA9A6.toInt()
+
           class MainActivity : Activity() {
               data class St(val name: String, val url: String, var fav: Boolean)
 
@@ -116,8 +250,10 @@ jobs:
               private var sleepPos = 0
               private lateinit var prefs: SharedPreferences
               private lateinit var status: TextView
+              private lateinit var nowName: TextView
               private lateinit var sleepInfo: TextView
-              private lateinit var play: Button
+              private lateinit var alTime: TextView
+              private lateinit var play: TextView
               private lateinit var spin: Spinner
               private lateinit var favOnly: CheckBox
 
@@ -129,6 +265,9 @@ jobs:
               private val bufLbl = listOf("صغير (استجابة أسرع)", "متوسط", "كبير (أقل تقطيعًا)")
 
               private fun dp(x: Int) = (x * resources.displayMetrics.density).toInt()
+              private fun rr(c: Int, r: Int) = GradientDrawable().apply { setColor(c); cornerRadius = dp(r).toFloat() }
+              private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+              private fun timeStr() = "%02d:%02d".format(prefs.getInt("alH", 7), prefs.getInt("alM", 0))
 
               private fun Spinner.items(l: List<String>) {
                   adapter = ArrayAdapter(context, android.R.layout.simple_spinner_item, l).also {
@@ -145,8 +284,7 @@ jobs:
 
               private fun load() {
                   all.clear()
-                  val raw = prefs.getString("st", null)
-                      ?: "الجزيرة\thttps://live-hls-audio-web-aja.getaj.net/VOICE-AJA/01.m3u8\t0"
+                  val raw = prefs.getString("st", null) ?: "${Cfg.DEF_NAME}\t${Cfg.DEF_URL}\t0"
                   raw.split("\n").forEach {
                       val p = it.split("\t")
                       if (p.size >= 3) all.add(St(p[0], p[1], p[2] == "1"))
@@ -154,9 +292,10 @@ jobs:
               }
 
               private fun save() {
-                  val s = all.joinToString("\n") { "${it.name}\t${it.url}\t${if (it.fav) 1 else 0}" }
-                  prefs.edit().putString("st", s).apply()
+                  prefs.edit().putString("st", all.joinToString("\n") { "${it.name}\t${it.url}\t${if (it.fav) 1 else 0}" }).apply()
               }
+
+              private fun pick(s: St) { prefs.edit().putString("sel", s.url).putString("selName", s.name).apply() }
 
               private fun refresh() {
                   val sel = prefs.getString("sel", "")
@@ -185,9 +324,7 @@ jobs:
                   } else if (c.currentMediaItem?.localConfiguration?.uri?.toString() == s.url &&
                       c.playbackState != Player.STATE_IDLE
                   ) {
-                      err = null
-                      c.seekToDefaultPosition()
-                      c.play()
+                      err = null; c.seekToDefaultPosition(); c.play()
                   } else playSelected()
               }
 
@@ -195,7 +332,7 @@ jobs:
                   val c = ctl
                   if (c == null) { status.text = "جارٍ الاتصال بالخدمة…"; return }
                   val on = c.playWhenReady && c.playbackState != Player.STATE_IDLE
-                  play.text = if (on) "⏸  إيقاف" else "▶  تشغيل"
+                  play.text = if (on) "❚❚" else "▶"
                   status.text = when {
                       on && c.isPlaying -> "يعمل الآن"
                       on -> "جارٍ التحميل…"
@@ -233,259 +370,41 @@ jobs:
                       .setPositiveButton("إضافة") { _, _ ->
                           val url = u.text.toString().trim()
                           val name = n.text.toString().trim().ifEmpty { "محطة" }.replace(Regex("[\t\n]"), " ")
-                          if (url.startsWith("http")) {
-                              all.add(St(name, url, false)); save()
-                              prefs.edit().putString("sel", url).apply(); refresh()
-                          } else Toast.makeText(this, "الرابط يجب أن يبدأ بـ http", Toast.LENGTH_SHORT).show()
+                          if (url.startsWith("http")) { addStation(name, url) } else toast("الرابط يجب أن يبدأ بـ http")
                       }.setNegativeButton("إلغاء", null).show()
               }
 
-              private fun buildUi() {
-                  val light = 0xFFF1EADB.toInt()
-                  val mute = 0xFF8FA9A6.toInt()
-                  val root = LinearLayout(this).apply {
+              private fun addStation(name: String, url: String) {
+                  val s = St(name.replace(Regex("[\t\n]"), " "), url, false)
+                  all.add(s); save(); pick(s); refresh()
+              }
+
+              private fun searchDialog() {
+                  val q = EditText(this).apply { hint = "اسم المحطة أو البلد"; imeOptions = EditorInfo.IME_ACTION_SEARCH; setSingleLine() }
+                  val res = mutableListOf<Pair<String, String>>()
+                  val ad = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf<String>())
+                  val list = ListView(this).apply { adapter = ad }
+                  val box = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(dp(20), dp(36), dp(20), dp(24))
-                      layoutDirection = View.LAYOUT_DIRECTION_RTL
+                      setPadding(dp(16), dp(8), dp(16), 0)
+                      addView(q); addView(list, LinearLayout.LayoutParams(-1, dp(320)))
                   }
-                  fun tv(t: String, sz: Float, c: Int) = TextView(this).apply { text = t; textSize = sz; setTextColor(c) }
-                  fun lab(t: String) = tv(t, 14f, mute).apply { setPadding(0, dp(18), 0, dp(4)) }
-                  fun btn(t: String, f: () -> Unit) = Button(this).apply { text = t; setOnClickListener { f() } }
-                  fun lp() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-
-                  status = tv("", 15f, mute)
-                  sleepInfo = tv("", 13f, 0xFFD9B36A.toInt())
-                  favOnly = CheckBox(this).apply {
-                      text = "المفضلة فقط"; setTextColor(light)
-                      setOnCheckedChangeListener { _, _ -> refresh() }
-                  }
-                  spin = Spinner(this)
-                  spin.onSel { i ->
-                      vis.getOrNull(i)?.let { s ->
-                          prefs.edit().putString("sel", s.url).apply()
-                          val c = ctl
-                          if (c != null && c.playWhenReady &&
-                              c.currentMediaItem?.localConfiguration?.uri?.toString() != s.url
-                          ) playSelected()
-                      }
-                  }
-                  play = btn("▶  تشغيل") { toggle() }.apply {
-                      textSize = 20f
-                      setBackgroundColor(0xFFD9B36A.toInt()); setTextColor(0xFF12302F.toInt())
-                  }
-                  val row = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      addView(btn("★ مفضلة") { cur()?.let { it.fav = !it.fav; save(); refresh() } }, lp())
-                      addView(btn("＋ إضافة") { addDialog() }, lp())
-                      addView(btn("حذف") {
-                          val s = cur()
-                          if (s != null && all.size > 1) { all.remove(s); save(); refresh() }
-                          else Toast.makeText(this@MainActivity, "لا يمكن حذف المحطة الوحيدة", Toast.LENGTH_SHORT).show()
-                      }, lp())
-                  }
-                  val sleepSp = Spinner(this).apply { items(sleepLbl) }
-                  val bufSp = Spinner(this).apply { items(bufLbl) }
-                  sleepPos = if (prefs.getLong("sleepEnd", 0L) > System.currentTimeMillis()) prefs.getInt("sleepPos", 0) else 0
-                  sleepSp.setSelection(sleepPos)
-                  bufSp.setSelection(prefs.getInt("buf", 1))
-                  sleepSp.onSel { pos ->
-                      if (pos != sleepPos) {
-                          sleepPos = pos
-                          val m = sleepMin[pos]
-                          ctl?.sendCustomCommand(SessionCommand("sleep", Bundle.EMPTY), Bundle().apply { putInt("min", m) })
-                          prefs.edit().putInt("sleepPos", pos)
-                              .putLong("sleepEnd", if (m > 0) System.currentTimeMillis() + m * 60_000L else 0L).apply()
-                          showSleep()
-                      }
-                  }
-                  bufSp.onSel { pos ->
-                      if (pos != prefs.getInt("buf", 1)) {
-                          prefs.edit().putInt("buf", pos).apply()
-                          ctl?.sendCustomCommand(SessionCommand("buf", Bundle.EMPTY), Bundle.EMPTY)
-                      }
-                  }
-
-                  root.addView(tv("راديو الجزيرة", 26f, light))
-                  root.addView(status)
-                  root.addView(lab("المحطة"))
-                  root.addView(spin)
-                  root.addView(favOnly)
-                  root.addView(row)
-                  root.addView(play, LinearLayout.LayoutParams(-1, dp(72)).apply { topMargin = dp(20) })
-                  root.addView(lab("مؤقّت النوم"))
-                  root.addView(sleepSp)
-                  root.addView(sleepInfo)
-                  root.addView(lab("التخزين المؤقت"))
-                  root.addView(bufSp)
-                  setContentView(ScrollView(this).apply { setBackgroundColor(0xFF0E2A2F.toInt()); addView(root) })
-                  refresh()
-                  showSleep()
-              }
-
-              override fun onCreate(b: Bundle?) {
-                  super.onCreate(b)
-                  prefs = getSharedPreferences("aj", MODE_PRIVATE)
-                  load()
-                  if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
-                  buildUi()
-              }
-
-              override fun onStart() {
-                  super.onStart()
-                  val f = MediaController.Builder(this, SessionToken(this, ComponentName(this, PlaybackService::class.java))).buildAsync()
-                  fut = f
-                  f.addListener({
-                      try { ctl = f.get(); ctl?.addListener(lis); updateUi() } catch (e: Exception) { status.text = "تعذّر الاتصال بالخدمة" }
-                  }, ContextCompat.getMainExecutor(this))
-              }
-
-              override fun onStop() {
-                  fut?.let { MediaController.releaseFuture(it) }
-                  fut = null; ctl = null
-                  super.onStop()
-              }
-          }
-          EOF_FILE_2
-          mkdir -p $(dirname app/src/main/java/com/example/ajradio/PlaybackService.kt)
-          cat > app/src/main/java/com/example/ajradio/PlaybackService.kt <<'EOF_FILE_3'
-          package com.example.ajradio
-
-          import android.content.Intent
-          import android.os.Bundle
-          import android.os.Handler
-          import android.os.Looper
-          import androidx.media3.common.AudioAttributes
-          import androidx.media3.common.C
-          import androidx.media3.common.MediaItem
-          import androidx.media3.common.MediaMetadata
-          import androidx.media3.common.util.UnstableApi
-          import androidx.media3.exoplayer.DefaultLoadControl
-          import androidx.media3.exoplayer.ExoPlayer
-          import androidx.media3.session.MediaSession
-          import androidx.media3.session.MediaSessionService
-          import androidx.media3.session.SessionCommand
-          import androidx.media3.session.SessionResult
-          import com.google.common.util.concurrent.Futures
-          import com.google.common.util.concurrent.ListenableFuture
-
-          object Cfg {
-              val sec = intArrayOf(10, 30, 90)
-              val off = longArrayOf(6000, 20000, 45000)
-              fun live(idx: Int) = MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(off[idx]).build()
-              fun item(url: String, name: String, idx: Int): MediaItem = MediaItem.Builder()
-                  .setUri(url)
-                  .setMediaMetadata(MediaMetadata.Builder().setTitle(name).setArtist("بث مباشر").build())
-                  .setLiveConfiguration(live(idx))
-                  .build()
-          }
-
-          @UnstableApi
-          class PlaybackService : MediaSessionService() {
-              private var session: MediaSession? = null
-              private val handler = Handler(Looper.getMainLooper())
-              private val sleepStop = Runnable { session?.player?.pause() }
-
-              private fun bufIdx() = getSharedPreferences("aj", MODE_PRIVATE).getInt("buf", 1)
-
-              private fun makePlayer(): ExoPlayer {
-                  val ms = Cfg.sec[bufIdx()] * 1000
-                  val lc = DefaultLoadControl.Builder().setBufferDurationsMs(ms, ms * 2, 2500, 5000).build()
-                  return ExoPlayer.Builder(this)
-                      .setLoadControl(lc)
-                      .setAudioAttributes(
-                          AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
-                              .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build(), true
-                      )
-                      .setHandleAudioBecomingNoisy(true)
-                      .setWakeMode(C.WAKE_MODE_NETWORK)
-                      .build()
-              }
-
-              private fun rebuild() {
-                  val s = session ?: return
-                  val old = s.player
-                  val item = old.currentMediaItem
-                  val play = old.playWhenReady
-                  val np = makePlayer()
-                  s.player = np
-                  old.release()
-                  if (item != null) {
-                      np.setMediaItem(item.buildUpon().setLiveConfiguration(Cfg.live(bufIdx())).build())
-                      np.prepare()
-                      np.playWhenReady = play
-                  }
-              }
-
-              private inner class Cb : MediaSession.Callback {
-                  override fun onConnect(
-                      session: MediaSession, controller: MediaSession.ControllerInfo
-                  ): MediaSession.ConnectionResult {
-                      val cmds = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
-                          .add(SessionCommand("buf", Bundle.EMPTY))
-                          .add(SessionCommand("sleep", Bundle.EMPTY)).build()
-                      return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
-                          .setAvailableSessionCommands(cmds).build()
-                  }
-
-                  override fun onCustomCommand(
-                      session: MediaSession, controller: MediaSession.ControllerInfo,
-                      customCommand: SessionCommand, args: Bundle
-                  ): ListenableFuture<SessionResult> {
-                      when (customCommand.customAction) {
-                          "buf" -> rebuild()
-                          "sleep" -> {
-                              handler.removeCallbacks(sleepStop)
-                              val m = args.getInt("min", 0)
-                              if (m > 0) handler.postDelayed(sleepStop, m * 60_000L)
+                  val dlg = AlertDialog.Builder(this).setTitle("بحث عن محطة").setView(box).setNegativeButton("إغلاق", null).create()
+                  q.setOnEditorActionListener { _, _, _ ->
+                      val t = q.text.toString().trim()
+                      if (t.isNotEmpty()) Thread {
+                          val r = Cfg.search(t)
+                          runOnUiThread {
+                              res.clear(); res.addAll(r); ad.clear(); ad.addAll(r.map { it.first })
+                              if (r.isEmpty()) toast("لا نتائج أو لا يوجد اتصال")
                           }
-                      }
-                      return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                      }.start()
+                      true
                   }
+                  list.setOnItemClickListener { _, _, i, _ ->
+                      addStation(res[i].first, res[i].second); toast("أُضيفت المحطة"); dlg.dismiss()
+                  }
+                  dlg.show()
               }
 
-              override fun onCreate() {
-                  super.onCreate()
-                  session = MediaSession.Builder(this, makePlayer()).setCallback(Cb()).build()
-              }
-
-              override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
-
-              override fun onTaskRemoved(rootIntent: Intent?) {
-                  val p = session?.player
-                  if (p == null || !p.playWhenReady) stopSelf()
-              }
-
-              override fun onDestroy() {
-                  handler.removeCallbacks(sleepStop)
-                  session?.run { player.release(); release() }
-                  session = null
-                  super.onDestroy()
-              }
-          }
-          EOF_FILE_3
-          mkdir -p $(dirname build.gradle.kts)
-          cat > build.gradle.kts <<'EOF_FILE_4'
-          plugins {
-              id("com.android.application") version "8.5.2" apply false
-              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
-          }
-          EOF_FILE_4
-          mkdir -p $(dirname gradle.properties)
-          cat > gradle.properties <<'EOF_FILE_5'
-          android.useAndroidX=true
-          org.gradle.jvmargs=-Xmx2g
-          EOF_FILE_5
-          mkdir -p $(dirname settings.gradle.kts)
-          cat > settings.gradle.kts <<'EOF_FILE_6'
-          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
-          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
-          rootProject.name = "AJRadio"
-          include(":app")
-          EOF_FILE_6
-      - name: Build
-        run: gradle assembleDebug --no-daemon
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: AJ Radio build ${{ github.run_number }}
-          files: app/build/outputs/apk/debug/app-debug.apk
+              private fun bu
