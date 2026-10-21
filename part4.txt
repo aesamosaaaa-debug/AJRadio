@@ -1,0 +1,181 @@
+mkdir -p $(dirname app/src/main/java/com/example/ajradio/PlaybackService.kt)
+cat > app/src/main/java/com/example/ajradio/PlaybackService.kt <<'EOF_SEG_8'
+package com.example.ajradio
+
+import android.content.Intent
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaSession
+import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+
+@UnstableApi
+class PlaybackService : MediaSessionService() {
+    private var session: MediaSession? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private val sleepStop = Runnable { session?.player?.pause() }
+
+    private fun bufIdx() = getSharedPreferences("aj", MODE_PRIVATE).getInt("buf", 1)
+
+    private fun makePlayer(): ExoPlayer {
+        val ms = Cfg.sec[bufIdx()] * 1000
+        val lc = DefaultLoadControl.Builder().setBufferDurationsMs(ms, ms * 2, 2500, 5000).build()
+        return ExoPlayer.Builder(this)
+            .setLoadControl(lc)
+            .setAudioAttributes(
+                AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build(), true
+            )
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
+            .build()
+    }
+
+    private fun rebuild() {
+        val s = session ?: return
+        val old = s.player
+        val item = old.currentMediaItem
+        val play = old.playWhenReady
+        val np = makePlayer()
+        s.player = np
+        old.release()
+        if (item != null) {
+            np.setMediaItem(item.buildUpon().setLiveConfiguration(Cfg.live(bufIdx())).build())
+            np.prepare()
+            np.playWhenReady = play
+        }
+    }
+
+    private inner class Cb : MediaSession.Callback {
+        override fun onConnect(
+            session: MediaSession, controller: MediaSession.ControllerInfo
+        ): MediaSession.ConnectionResult {
+            val cmds = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
+                .add(SessionCommand("buf", Bundle.EMPTY))
+                .add(SessionCommand("sleep", Bundle.EMPTY)).build()
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                .setAvailableSessionCommands(cmds).build()
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession, controller: MediaSession.ControllerInfo,
+            customCommand: SessionCommand, args: Bundle
+        ): ListenableFuture<SessionResult> {
+            when (customCommand.customAction) {
+                "buf" -> rebuild()
+                "sleep" -> {
+                    handler.removeCallbacks(sleepStop)
+                    val m = args.getInt("min", 0)
+                    if (m > 0) handler.postDelayed(sleepStop, m * 60_000L)
+                }
+            }
+            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        session = MediaSession.Builder(this, makePlayer()).setCallback(Cb()).build()
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val p = session?.player
+        if (p == null || !p.playWhenReady) stopSelf()
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacks(sleepStop)
+        session?.run { player.release(); release() }
+        session = null
+        super.onDestroy()
+    }
+}
+EOF_SEG_8
+mkdir -p $(dirname app/src/main/res/drawable/ic_fg.xml)
+cat > app/src/main/res/drawable/ic_fg.xml <<'EOF_SEG_9'
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#E3B866" android:strokeWidth="3" android:strokeLineCap="round"
+        android:pathData="M40,46L64,30" />
+    <path android:fillColor="#E3B866"
+        android:pathData="M36,46h36a6,6 0 0 1 6,6v18a6,6 0 0 1 -6,6h-36a6,6 0 0 1 -6,-6v-18a6,6 0 0 1 6,-6z" />
+    <path android:fillColor="#0E2A2F"
+        android:pathData="M43,53a8,8 0 1,0 0.01,0z" />
+    <path android:fillColor="#0E2A2F"
+        android:pathData="M58,54h12v3h-12z M58,61h12v3h-12z" />
+</vector>
+EOF_SEG_9
+mkdir -p $(dirname app/src/main/res/drawable/widget_bg.xml)
+cat > app/src/main/res/drawable/widget_bg.xml <<'EOF_SEG_10'
+<?xml version="1.0" encoding="utf-8"?>
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#12333A" />
+    <corners android:radius="20dp" />
+    <stroke android:width="1dp" android:color="#E3B866" />
+</shape>
+EOF_SEG_10
+mkdir -p $(dirname app/src/main/res/layout/widget.xml)
+cat > app/src/main/res/layout/widget.xml <<'EOF_SEG_11'
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/wroot" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:gravity="center" android:padding="12dp" android:background="@drawable/widget_bg">
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="▶  راديو الانترنت" android:textColor="#F1EADB" android:textSize="16sp" />
+</LinearLayout>
+EOF_SEG_11
+mkdir -p $(dirname app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml)
+cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF_SEG_12'
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_bg" />
+    <foreground android:drawable="@drawable/ic_fg" />
+</adaptive-icon>
+EOF_SEG_12
+mkdir -p $(dirname app/src/main/res/values/colors.xml)
+cat > app/src/main/res/values/colors.xml <<'EOF_SEG_13'
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_bg">#0E2A2F</color>
+</resources>
+EOF_SEG_13
+mkdir -p $(dirname app/src/main/res/xml/widget_info.xml)
+cat > app/src/main/res/xml/widget_info.xml <<'EOF_SEG_14'
+<?xml version="1.0" encoding="utf-8"?>
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="180dp" android:minHeight="56dp" android:updatePeriodMillis="0"
+    android:initialLayout="@layout/widget" android:resizeMode="horizontal" android:widgetCategory="home_screen" />
+EOF_SEG_14
+mkdir -p $(dirname build.gradle.kts)
+cat > build.gradle.kts <<'EOF_SEG_15'
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+}
+EOF_SEG_15
+mkdir -p $(dirname gradle.properties)
+cat > gradle.properties <<'EOF_SEG_16'
+android.useAndroidX=true
+org.gradle.jvmargs=-Xmx2g
+EOF_SEG_16
+mkdir -p $(dirname settings.gradle.kts)
+cat > settings.gradle.kts <<'EOF_SEG_17'
+pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+rootProject.name = "AJRadio"
+include(":app")
+EOF_SEG_17

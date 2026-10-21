@@ -1,0 +1,171 @@
+cat >> app/src/main/java/com/example/ajradio/MainActivity.kt <<'EOF_SEG_7'
+    }
+
+    private fun addStation(name: String, url: String) {
+        val s = St(name.replace(Regex("[\t\n]"), " "), url, false)
+        all.add(s); save(); pick(s); refresh()
+    }
+
+    private fun searchDialog() {
+        val q = EditText(this).apply { hint = "اسم المحطة أو البلد"; imeOptions = EditorInfo.IME_ACTION_SEARCH; setSingleLine() }
+        val res = mutableListOf<Pair<String, String>>()
+        val ad = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf<String>())
+        val list = ListView(this).apply { adapter = ad }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), 0)
+            addView(q); addView(list, LinearLayout.LayoutParams(-1, dp(320)))
+        }
+        val dlg = AlertDialog.Builder(this).setTitle("بحث عن محطة").setView(box).setNegativeButton("إغلاق", null).create()
+        q.setOnEditorActionListener { _, _, _ ->
+            val t = q.text.toString().trim()
+            if (t.isNotEmpty()) Thread {
+                val r = Cfg.search(t)
+                runOnUiThread {
+                    res.clear(); res.addAll(r); ad.clear(); ad.addAll(r.map { it.first })
+                    if (r.isEmpty()) toast("لا نتائج أو لا يوجد اتصال")
+                }
+            }.start()
+            true
+        }
+        list.setOnItemClickListener { _, _, i, _ ->
+            addStation(res[i].first, res[i].second); toast("أُضيفت المحطة"); dlg.dismiss()
+        }
+        dlg.show()
+    }
+
+    private fun buildUi() {
+        window.statusBarColor = BG
+        window.navigationBarColor = BG
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(36), dp(16), dp(28))
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        fun tv(t: String, sz: Float, c: Int = TXT, bold: Boolean = false) = TextView(this).apply {
+            text = t; textSize = sz; setTextColor(c); if (bold) setTypeface(typeface, Typeface.BOLD)
+        }
+        fun lab(t: String) = tv(t, 13f, MUTE).apply { setPadding(0, 0, 0, dp(8)) }
+        fun card() = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; background = rr(CARD, 22)
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
+        }
+        fun section(t: String, vararg v: View) = card().also { c -> c.addView(lab(t)); v.forEach { c.addView(it) } }
+        fun chip(t: String, f: () -> Unit) = TextView(this).apply {
+            text = t; gravity = Gravity.CENTER; setTextColor(TXT); textSize = 14f
+            background = rr(CHIP, 14); setPadding(dp(4), dp(12), dp(4), dp(12)); setOnClickListener { f() }
+        }
+        fun lp() = LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(3); marginEnd = dp(3) }
+        fun sp(s: Spinner) = s.apply { background = rr(CHIP, 14); setPadding(dp(8), dp(10), dp(8), dp(10)) }
+
+        status = tv("", 14f, MUTE)
+        nowName = tv("", 22f, TXT, true)
+        sleepInfo = tv("", 13f, GOLD)
+        play = TextView(this).apply {
+            gravity = Gravity.CENTER; textSize = 30f; setTextColor(BG)
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(GOLD) }
+            setOnClickListener { toggle() }
+        }
+        favOnly = CheckBox(this).apply {
+            text = "المفضلة فقط"; setTextColor(TXT)
+            setOnCheckedChangeListener { _, _ -> refresh() }
+        }
+        spin = sp(Spinner(this))
+        spin.onSel { i ->
+            vis.getOrNull(i)?.let { s ->
+                pick(s); nowName.text = s.name
+                val c = ctl
+                if (c != null && c.playWhenReady &&
+                    c.currentMediaItem?.localConfiguration?.uri?.toString() != s.url
+                ) playSelected()
+            }
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(chip("★ مفضلة") { cur()?.let { it.fav = !it.fav; save(); refresh() } }, lp())
+            addView(chip("＋ إضافة") { addDialog() }, lp())
+            addView(chip("🔍 بحث") { searchDialog() }, lp())
+            addView(chip("حذف") {
+                val s = cur()
+                if (s != null && all.size > 1) { all.remove(s); save(); refresh() } else toast("لا يمكن حذف المحطة الوحيدة")
+            }, lp())
+        }
+        val sleepSp = sp(Spinner(this)).apply { items(sleepLbl) }
+        val bufSp = sp(Spinner(this)).apply { items(bufLbl) }
+        sleepPos = if (prefs.getLong("sleepEnd", 0L) > System.currentTimeMillis()) prefs.getInt("sleepPos", 0) else 0
+        sleepSp.setSelection(sleepPos)
+        bufSp.setSelection(prefs.getInt("buf", 1))
+        sleepSp.onSel { pos ->
+            if (pos != sleepPos) {
+                sleepPos = pos
+                val m = sleepMin[pos]
+                ctl?.sendCustomCommand(SessionCommand("sleep", Bundle.EMPTY), Bundle().apply { putInt("min", m) })
+                prefs.edit().putInt("sleepPos", pos)
+                    .putLong("sleepEnd", if (m > 0) System.currentTimeMillis() + m * 60_000L else 0L).apply()
+                showSleep()
+            }
+        }
+        bufSp.onSel { pos ->
+            if (pos != prefs.getInt("buf", 1)) {
+                prefs.edit().putInt("buf", pos).apply()
+                ctl?.sendCustomCommand(SessionCommand("buf", Bundle.EMPTY), Bundle.EMPTY)
+            }
+        }
+        alTime = chip(timeStr()) {
+            TimePickerDialog(this, { _, h, m ->
+                prefs.edit().putInt("alH", h).putInt("alM", m).apply()
+                alTime.text = timeStr()
+                if (prefs.getBoolean("alOn", false)) Cfg.setAlarm(this)
+            }, prefs.getInt("alH", 7), prefs.getInt("alM", 0), true).show()
+        }
+        val alSw = Switch(this).apply {
+            text = "تشغيل الإذاعة عند الموعد يوميًا"; setTextColor(TXT)
+            isChecked = prefs.getBoolean("alOn", false)
+            setOnCheckedChangeListener { _, on ->
+                prefs.edit().putBoolean("alOn", on).apply()
+                if (on) { Cfg.setAlarm(this@MainActivity); toast("تم ضبط المنبّه") } else Cfg.cancelAlarm(this@MainActivity)
+            }
+        }
+
+        root.addView(tv("راديو الانترنت", 28f, TXT, true))
+        val player = card().apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(nowName); addView(status)
+            addView(play, LinearLayout.LayoutParams(dp(88), dp(88)).apply { topMargin = dp(16) })
+        }
+        root.addView(player)
+        root.addView(section("المحطات", spin, favOnly, row))
+        root.addView(section("مؤقّت النوم", sleepSp, sleepInfo))
+        root.addView(section("التخزين المؤقت", bufSp))
+        root.addView(section("المنبّه بالإذاعة", alTime, alSw))
+        setContentView(ScrollView(this).apply { setBackgroundColor(BG); addView(root) })
+        refresh()
+        showSleep()
+    }
+
+    override fun onCreate(b: Bundle?) {
+        super.onCreate(b)
+        prefs = getSharedPreferences("aj", MODE_PRIVATE)
+        load()
+        if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        buildUi()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (prefs.getBoolean("alOn", false)) Cfg.setAlarm(this)
+        val f = MediaController.Builder(this, SessionToken(this, ComponentName(this, PlaybackService::class.java))).buildAsync()
+        fut = f
+        f.addListener({
+            try { ctl = f.get(); ctl?.addListener(lis); updateUi() } catch (e: Exception) { status.text = "تعذّر الاتصال بالخدمة" }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    override fun onStop() {
+        fut?.let { MediaController.releaseFuture(it) }
+        fut = null; ctl = null
+        super.onStop()
+    }
+}
+EOF_SEG_7
